@@ -30,16 +30,15 @@
 <script src="https://unpkg.com/@livechat/agent-app-sdk/dist/agentapp.umd.min.js"></script>
 <script>
 (async () => {
-  // ----------------- yardımcılar -----------------
   const $ = sel => document.querySelector(sel);
-  const log = (m) => {
+  const log = m => {
     const el = $('#log');
     el.textContent += (typeof m === 'string' ? m : JSON.stringify(m, null, 2)) + "\n";
     el.scrollTop = el.scrollHeight;
   };
-  const setState = (t) => $('#state').innerHTML = `<small>${t}</small>`;
+  const setState = t => $('#state').innerHTML = `<small>${t}</small>`;
 
-  // güvenlik: CSRF için state üret
+  // ---- OAuth CSRF state ----
   function randomString(n=24){
     return [...crypto.getRandomValues(new Uint8Array(n))]
       .map(b=>b.toString(16).padStart(2,'0')).join('');
@@ -50,47 +49,62 @@
   }
   const OAUTH_STATE = localStorage.getItem(OAUTH_STATE_KEY);
 
-  // ----------------- Agent App SDK -----------------
+  // ---- SDK & chat id ----
   const sdk = await window.LiveChat.createDetailsWidget();
-
   let chatId = null;
-  async function waitForContext(attempts = 12, delayMs = 500) {
-  for (let i = 0; i < attempts; i++) {
-    try {
-      if (typeof window.LiveChat?.getContext === 'function') {
-        const ctx = await window.LiveChat.getContext();
-        if (ctx?.chat?.id) return ctx;
+
+  // önce SDK’dan bağlam almaya çalış, yoksa referrer’dan
+  async function setInitialContext() {
+    let ctx = null;
+    if (typeof window.LiveChat?.getContext === 'function') {
+      try { ctx = await window.LiveChat.getContext(); } catch(e) {}
+    }
+    if (!ctx?.chat?.id) {
+      const ref = document.referrer || '';
+      const m = ref.match(/\/chats\/[^/]+\/([A-Z0-9]+)/i);
+      if (m && m[1]) {
+        chatId = m[1];
+        setState(`Durum: sohbet bulundu (chat_id: ${chatId}) – (referrer)`);
+        log({ ctx_initial: null, from_referrer: chatId, referrer: ref });
+        maybeEnableExport();
+        return;
       }
-    } catch (e) { /* yoksay */ }
-    await new Promise(r => setTimeout(r, delayMs));
+    }
+    log({ ctx_initial: ctx });
+    if (ctx?.chat?.id) {
+      chatId = ctx.chat.id;
+      setState(`Durum: sohbet bulundu (chat_id: ${chatId})`);
+      maybeEnableExport();
+    } else {
+      setState("Durum: sohbet bekleniyor…");
+    }
   }
-  return null;
-}
-async function setInitialContext() {
-  const ctx = await waitForContext(); // burada sabırla bekliyoruz
-  log({ ctx_initial: ctx });
-  if (ctx?.chat?.id) {
-    chatId = ctx.chat.id;
-    setState(`Durum: sohbet bulundu (chat_id: ${chatId})`);
-    maybeEnableExport();
-  } else {
-    setState("Durum: sohbet bekleniyor…");
+
+  // event ile chat değişimi
+  if (sdk.on) {
+    sdk.on('chat_selected', data => {
+      const id = data?.chat?.id || data?.id;
+      if (id) {
+        chatId = id;
+        setState(`Durum: sohbet bulundu (chat_id: ${chatId})`);
+        maybeEnableExport();
+      }
+    });
+    sdk.on('chatSelected', data => {
+      const id = data?.chat?.id || data?.id;
+      if (id) {
+        chatId = id;
+        setState(`Durum: sohbet bulundu (chat_id: ${chatId})`);
+        maybeEnableExport();
+      }
+    });
   }
-}
-  sdk.on('chat_selected', (data) => {
-  const id = data?.chat?.id || data?.id || null;
-  log({ chat_selected: id });
-  chatId = id;
-  if (chatId) {
-    setState(`Durum: sohbet bulundu (chat_id: ${chatId})`);
-    maybeEnableExport();
-  }
-});
+
   await setInitialContext();
 
-  // ----------------- OAuth 2.1 (implicit) -----------------
+  // ---- OAuth ----
   const CLIENT_ID   = 'e65158671dae5dad51dd7d9b3fc8d222';
-  const REDIRECT_URI = 'https://deneme-ten-jade.vercel.app/'; // whitelist’e birebir ekli olmalı
+  const REDIRECT_URI = 'https://deneme-ten-jade.vercel.app/';
   const SCOPES = encodeURIComponent('chats--access:ro chats--all:ro');
 
   const hashParams = new URLSearchParams(location.hash.replace(/^#/, ''));
@@ -98,13 +112,11 @@ async function setInitialContext() {
   const stateFromHash = hashParams.get('state') || null;
   const expiresIn = Number(hashParams.get('expires_in') || 0);
 
-  // state doğrulaması
   if (accessToken && stateFromHash && stateFromHash !== OAUTH_STATE) {
-    accessToken = null; // eşleşmiyorsa token’ı reddet
+    accessToken = null;
     log('Uyarı: OAuth state eşleşmedi, token reddedildi.');
   }
 
-  // giriş butonunu hazırla
   const signInBtn = $('#signin');
   signInBtn.onclick = () => {
     const AUTH_URL =
@@ -113,7 +125,6 @@ async function setInitialContext() {
     window.location.href = AUTH_URL;
   };
 
-  // token yoksa giriş öner
   if (!accessToken) {
     signInBtn.style.display = 'inline-block';
     setState($('#state').textContent + " – token yok → önce giriş yap");
@@ -121,20 +132,17 @@ async function setInitialContext() {
     setState($('#state').textContent + " – token bulundu");
   }
 
-  // token süresi dolmadan yeniden giriş tetikle
   if (accessToken && expiresIn > 0) {
     setTimeout(() => {
-      // yeni hash taşımak için tekrar authorize
       if (confirm('Oturum süren dolmak üzere. Yeniden giriş yapalım mı?')) {
         signInBtn.click();
       }
     }, Math.max(1, (expiresIn - 60)) * 1000);
   }
 
-  // URL hash değişirse (yeniden yönlendirme sonrası) buton görünürlüğünü güncelle
   window.addEventListener('hashchange', () => maybeEnableExport());
 
-  // ----------------- Export butonu görünürlüğü -----------------
+  // ---- export görünürlüğü ----
   const exportBtn = $('#export');
   function maybeEnableExport() {
     if (chatId && (accessToken || new URLSearchParams(location.hash.slice(1)).get('access_token'))) {
@@ -145,17 +153,11 @@ async function setInitialContext() {
   }
   maybeEnableExport();
 
-  // ----------------- API çağrıları -----------------
-  async function fetchJsonOrText(res) {
-    const text = await res.text();
-    try { return JSON.parse(text); } catch { throw new Error(text); }
-  }
-
+  // ---- API çağrısı ----
   async function fetchChatJson(chatId) {
     if (!accessToken) throw new Error('access_token yok');
     if (!chatId) throw new Error('chatId yok');
 
-    // 1) arşivden son thread id’yi almaya çalış
     let threadId = null;
     try {
       const archivesRes = await fetch('https://api.livechatinc.com/v3.5/agent/action/list_archives', {
@@ -166,15 +168,9 @@ async function setInitialContext() {
       if (archivesRes.ok) {
         const archives = await archivesRes.json();
         threadId = archives?.chats?.[0]?.threads?.slice(-1)?.[0]?.id || null;
-      } else {
-        // arşiv hatası kritik değil; get_chat’le devam edebiliriz
-        log('list_archives başarısız ama get_chat deneniyor…');
       }
-    } catch(e) {
-      log('list_archives çağrısı sırasında hata: ' + (e?.message || e));
-    }
+    } catch(e) { log('list_archives hata: ' + (e?.message||e)); }
 
-    // 2) threadId varsa onunla, yoksa onsuz get_chat
     const payload = threadId ? { chat_id: chatId, thread_id: threadId } : { chat_id: chatId };
     const chatRes = await fetch('https://api.livechatinc.com/v3.5/agent/action/get_chat', {
       method: 'POST',
@@ -203,7 +199,7 @@ async function setInitialContext() {
     };
   }
 
-  // ----------------- İndir butonu -----------------
+  // ---- indir butonu ----
   exportBtn.onclick = async () => {
     try {
       exportBtn.disabled = true;
@@ -232,5 +228,3 @@ async function setInitialContext() {
 </script>
 </body>
 </html>
-
-
