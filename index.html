@@ -10,6 +10,7 @@
     button { padding:10px 14px; border:1px solid #ddd; border-radius:8px; cursor:pointer; }
     button[disabled] { opacity:.6; cursor:not-allowed; }
     #log { max-height:240px; overflow:auto; background:#f6f6f6; padding:8px; border-radius:8px; }
+    .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
     small { color:#666 }
   </style>
 </head>
@@ -19,9 +20,13 @@
 
   <div id="state"><small>Durum: başlatılıyor…</small></div>
 
-  <div>
+  <div class="row">
     <button id="signin" style="display:none">LiveChat ile giriş yap (OAuth)</button>
     <button id="export" style="display:none">Bu sohbeti JSON indir</button>
+
+    <!-- Manuel chat_id girişi (gerekirse) -->
+    <input id="manualId" placeholder="chat_id" style="width:220px;display:none" />
+    <button id="useManual" style="display:none">Set chat_id</button>
   </div>
 
   <pre id="log"></pre>
@@ -31,45 +36,48 @@
 <script>
 (async () => {
   const $ = sel => document.querySelector(sel);
-  const log = m => {
-    const el = $('#log');
-    el.textContent += (typeof m === 'string' ? m : JSON.stringify(m, null, 2)) + "\n";
-    el.scrollTop = el.scrollHeight;
-  };
+  const log = m => { const el = $('#log'); el.textContent += (typeof m === 'string' ? m : JSON.stringify(m, null, 2)) + "\n"; el.scrollTop = el.scrollHeight; };
   const setState = t => $('#state').innerHTML = `<small>${t}</small>`;
 
   // ---- OAuth CSRF state ----
-  function randomString(n=24){
-    return [...crypto.getRandomValues(new Uint8Array(n))]
-      .map(b=>b.toString(16).padStart(2,'0')).join('');
-  }
+  function randomString(n=24){ return [...crypto.getRandomValues(new Uint8Array(n))].map(b=>b.toString(16).padStart(2,'0')).join(''); }
   const OAUTH_STATE_KEY = 'lc_oauth_state';
-  if (!localStorage.getItem(OAUTH_STATE_KEY)) {
-    localStorage.setItem(OAUTH_STATE_KEY, randomString());
-  }
+  if (!localStorage.getItem(OAUTH_STATE_KEY)) localStorage.setItem(OAUTH_STATE_KEY, randomString());
   const OAUTH_STATE = localStorage.getItem(OAUTH_STATE_KEY);
 
   // ---- SDK & chat id ----
   const sdk = await window.LiveChat.createDetailsWidget();
   let chatId = null;
 
-  // önce SDK’dan bağlam almaya çalış, yoksa referrer’dan
+  function parseChatIdFromReferrer(ref) {
+    // 1) /chats/<something>/<CHAT_ID>
+    const mChats = ref.match(/\/chats\/[^/]+\/([A-Za-z0-9_-]+)/i);
+    if (mChats && mChats[1]) return mChats[1];
+    // 2) /archives/<CHAT_ID>
+    const mArchives = ref.match(/\/archives\/([A-Za-z0-9_-]+)/i);
+    if (mArchives && mArchives[1]) return mArchives[1];
+    return null;
+  }
+
   async function setInitialContext() {
     let ctx = null;
     if (typeof window.LiveChat?.getContext === 'function') {
       try { ctx = await window.LiveChat.getContext(); } catch(e) {}
     }
-    if (!ctx?.chat?.id) {
-      const ref = document.referrer || '';
-      const m = ref.match(/\/chats\/[^/]+\/([A-Z0-9]+)/i);
-      if (m && m[1]) {
-        chatId = m[1];
-        setState(`Durum: sohbet bulundu (chat_id: ${chatId}) – (referrer)`);
-        log({ ctx_initial: null, from_referrer: chatId, referrer: ref });
-        maybeEnableExport();
-        return;
-      }
+
+    // referrer fallback (Arşiv veya Chats)
+    const ref = document.referrer || '';
+    const fromRef = parseChatIdFromReferrer(ref);
+    log({ referrer: ref, parsed_from_referrer: fromRef });
+
+    if (fromRef) {
+      chatId = fromRef;
+      setState(`Durum: sohbet bulundu (chat_id: ${chatId}) – referrer`);
+      maybeEnableExport();
+      return;
     }
+
+    // SDK bağlamı
     log({ ctx_initial: ctx });
     if (ctx?.chat?.id) {
       chatId = ctx.chat.id;
@@ -77,28 +85,35 @@
       maybeEnableExport();
     } else {
       setState("Durum: sohbet bekleniyor…");
+      // Manuel giriş alanını aç
+      $('#manualId').style.display = 'inline-block';
+      $('#useManual').style.display = 'inline-block';
     }
   }
 
   // event ile chat değişimi
   if (sdk.on) {
-    sdk.on('chat_selected', data => {
+    const onSel = (data) => {
       const id = data?.chat?.id || data?.id;
       if (id) {
         chatId = id;
-        setState(`Durum: sohbet bulundu (chat_id: ${chatId})`);
+        setState(`Durum: sohbet bulundu (chat_id: ${chatId}) – event`);
         maybeEnableExport();
       }
-    });
-    sdk.on('chatSelected', data => {
-      const id = data?.chat?.id || data?.id;
-      if (id) {
-        chatId = id;
-        setState(`Durum: sohbet bulundu (chat_id: ${chatId})`);
-        maybeEnableExport();
-      }
-    });
+    };
+    sdk.on('chat_selected', onSel);
+    sdk.on('chatSelected', onSel);
   }
+
+  // Manuel set
+  $('#useManual').onclick = () => {
+    const v = $('#manualId').value.trim();
+    if (v) {
+      chatId = v;
+      setState(`Durum: sohbet bulundu (chat_id: ${chatId}) – manual`);
+      maybeEnableExport();
+    }
+  };
 
   await setInitialContext();
 
@@ -133,11 +148,7 @@
   }
 
   if (accessToken && expiresIn > 0) {
-    setTimeout(() => {
-      if (confirm('Oturum süren dolmak üzere. Yeniden giriş yapalım mı?')) {
-        signInBtn.click();
-      }
-    }, Math.max(1, (expiresIn - 60)) * 1000);
+    setTimeout(() => { if (confirm('Oturum süren dolmak üzere. Yeniden giriş yapalım mı?')) signInBtn.click(); }, Math.max(1, (expiresIn - 60)) * 1000);
   }
 
   window.addEventListener('hashchange', () => maybeEnableExport());
@@ -145,11 +156,8 @@
   // ---- export görünürlüğü ----
   const exportBtn = $('#export');
   function maybeEnableExport() {
-    if (chatId && (accessToken || new URLSearchParams(location.hash.slice(1)).get('access_token'))) {
-      exportBtn.style.display = 'inline-block';
-    } else {
-      exportBtn.style.display = 'none';
-    }
+    const hasToken = !!(accessToken || new URLSearchParams(location.hash.slice(1)).get('access_token'));
+    exportBtn.style.display = (chatId && hasToken) ? 'inline-block' : 'none';
   }
   maybeEnableExport();
 
