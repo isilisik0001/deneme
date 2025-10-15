@@ -54,17 +54,28 @@
   const sdk = await window.LiveChat.createDetailsWidget();
 
   let chatId = null;
-  async function setInitialContext() {
-    const ctx = await sdk.getContext();
-    log({ ctx_initial: { chat_id: ctx?.chat?.id || null } });
-    if (ctx?.chat?.id) {
-      chatId = ctx.chat.id;
-      setState(`Durum: sohbet bulundu (chat_id: ${chatId})`);
-      maybeEnableExport();
-    } else {
-      setState("Durum: sohbet bekleniyor…");
-    }
+ async function setInitialContext() {
+  let ctx = null;
+
+  // 1) Yeni sürümler: global getContext
+  if (typeof window.LiveChat?.getContext === 'function') {
+    ctx = await window.LiveChat.getContext();
   }
+  // 2) Eski sürümler için yedek (varsa)
+  else if (sdk && typeof sdk.getContext === 'function') {
+    ctx = await sdk.getContext();
+  }
+
+  log({ ctx_initial: ctx });
+
+  if (ctx?.chat?.id) {
+    chatId = ctx.chat.id;
+    setState(`Durum: sohbet bulundu (chat_id: ${chatId})`);
+    maybeEnableExport();
+  } else {
+    setState("Durum: sohbet bekleniyor…");
+  }
+}
   sdk.on('chat_selected', (data) => {
     log({ chat_selected: { chat_id: data?.chat?.id || null } });
     chatId = data?.chat?.id || null;
@@ -217,3 +228,4 @@
 </script>
 </body>
 </html>
+
