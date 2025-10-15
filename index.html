@@ -1,0 +1,67 @@
+<!-- widget index.html -->
+<script src="https://unpkg.com/@livechat/agent-app-sdk/dist/agentapp.umd.min.js"></script>
+<div id="app">
+  <button id="export">Bu sohbeti JSON indir</button>
+  <pre id="log"></pre>
+</div>
+<script>
+(async () => {
+  // 1) Agent App SDK ile bağlan ve aktif sohbet bilgisini al
+  const sdk = await window.LiveChat.createDetailsWidget(); // Agent App Widgets içinden çalışır
+  // aktif sohbet id’sini almak için context/selection API’sini kullan:
+  const context = await sdk.getContext();                 // örn. { chat: { id: 'CHAT_ID', ... } }
+  const chatId = context?.chat?.id;
+  if (!chatId) document.getElementById('log').textContent = 'Sohbet seçili değil.';
+
+  // 2) OAuth access_token’i URL hash’inden ya da senin backend’inden al
+  const accessToken = new URLSearchParams(location.hash.replace('#','')).get('access_token');
+  // (Prod’da token’i backend’inden alman daha güvenli)
+
+  // 3) Tam sohbeti çek (REST: list_archives ile thread bul, sonra get_chat)
+  async function fetchChatJson(chatId) {
+    // list_archives ile tek sohbete filtre örneği
+    const archives = await fetch('https://api.livechatinc.com/v3.5/agent/action/list_archives', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filters: { chat_ids: [chatId] }, limit: 1 })
+    }).then(r => r.json());
+
+    // son thread id’sini çıkar
+    const threadId = archives?.chats?.[0]?.threads?.slice(-1)?.[0]?.id;
+
+    // get_chat ile tam thread (tüm eventler)
+    const chat = await fetch('https://api.livechatinc.com/v3.5/agent/action/get_chat', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, thread_id: threadId })
+    }).then(r => r.json());
+
+    // 4) Sade JSON şeması
+    const normalized = {
+      chat_id: chatId,
+      thread_id: threadId,
+      users: chat?.chat?.users || [],
+      properties: chat?.chat?.properties || {},
+      events: (chat?.chat?.thread?.events || []).map(e => ({
+        id: e.id,
+        ts: e.created_at,
+        author_type: e.author?.type,
+        author_id: e.author?.id,
+        type: e.type,                 // message, file, system, custom, etc.
+        text: e.text,
+        attachments: e.attachments || null,
+        custom: e.custom_id || null
+      }))
+    };
+    return normalized;
+  }
+
+  // 5) İndir butonu
+  document.getElementById('export').onclick = async () => {
+    const data = await fetchChatJson(chatId);
+    const blob = new Blob([JSON.stringify(data, null, 2)], {type: 'application/json'});
+    const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: `chat-${data.chat_id}.json` });
+    a.click();
+  };
+})();
+</script>
