@@ -54,20 +54,21 @@
   const sdk = await window.LiveChat.createDetailsWidget();
 
   let chatId = null;
- async function setInitialContext() {
-  let ctx = null;
-
-  // 1) Yeni sürümler: global getContext
-  if (typeof window.LiveChat?.getContext === 'function') {
-    ctx = await window.LiveChat.getContext();
+  async function waitForContext(attempts = 12, delayMs = 500) {
+  for (let i = 0; i < attempts; i++) {
+    try {
+      if (typeof window.LiveChat?.getContext === 'function') {
+        const ctx = await window.LiveChat.getContext();
+        if (ctx?.chat?.id) return ctx;
+      }
+    } catch (e) { /* yoksay */ }
+    await new Promise(r => setTimeout(r, delayMs));
   }
-  // 2) Eski sürümler için yedek (varsa)
-  else if (sdk && typeof sdk.getContext === 'function') {
-    ctx = await sdk.getContext();
-  }
-
+  return null;
+}
+async function setInitialContext() {
+  const ctx = await waitForContext(); // burada sabırla bekliyoruz
   log({ ctx_initial: ctx });
-
   if (ctx?.chat?.id) {
     chatId = ctx.chat.id;
     setState(`Durum: sohbet bulundu (chat_id: ${chatId})`);
@@ -77,11 +78,14 @@
   }
 }
   sdk.on('chat_selected', (data) => {
-    log({ chat_selected: { chat_id: data?.chat?.id || null } });
-    chatId = data?.chat?.id || null;
-    if (chatId) setState(`Durum: sohbet bulundu (chat_id: ${chatId})`);
+  const id = data?.chat?.id || data?.id || null;
+  log({ chat_selected: id });
+  chatId = id;
+  if (chatId) {
+    setState(`Durum: sohbet bulundu (chat_id: ${chatId})`);
     maybeEnableExport();
-  });
+  }
+});
   await setInitialContext();
 
   // ----------------- OAuth 2.1 (implicit) -----------------
@@ -228,4 +232,5 @@
 </script>
 </body>
 </html>
+
 
