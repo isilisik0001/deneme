@@ -1,45 +1,112 @@
-<!-- widget index.html -->
-<script src="https://unpkg.com/@livechat/agent-app-sdk/dist/agentapp.umd.min.js"></script>
-<div id="app">
-  <button id="export">Bu sohbeti JSON indir</button>
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Export Chat JSON</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin:16px; }
+    #wrap { display:flex; flex-direction:column; gap:12px; }
+    button { padding:10px 14px; border:1px solid #ddd; border-radius:8px; cursor:pointer; }
+    #log { max-height:220px; overflow:auto; background:#f6f6f6; padding:8px; border-radius:8px; }
+    small { color:#666 }
+  </style>
+</head>
+<body>
+<div id="wrap">
+  <h3>Export Chat JSON</h3>
+
+  <div id="state"><small>Durum: başlatılıyor…</small></div>
+
+  <div>
+    <button id="signin" style="display:none">LiveChat ile giriş yap (OAuth)</button>
+    <button id="export" style="display:none">Bu sohbeti JSON indir</button>
+  </div>
+
   <pre id="log"></pre>
 </div>
+
+<script src="https://unpkg.com/@livechat/agent-app-sdk/dist/agentapp.umd.min.js"></script>
 <script>
 (async () => {
-  // 1) Agent App SDK ile bağlan ve aktif sohbet bilgisini al
-  const sdk = await window.LiveChat.createDetailsWidget(); // Agent App Widgets içinden çalışır
-  // aktif sohbet id’sini almak için context/selection API’sini kullan:
-  const context = await sdk.getContext();                 // örn. { chat: { id: 'CHAT_ID', ... } }
-  const chatId = context?.chat?.id;
-  if (!chatId) document.getElementById('log').textContent = 'Sohbet seçili değil.';
+  const $ = sel => document.querySelector(sel);
+  const log = (m) => { const el = $('#log'); el.textContent += (typeof m === 'string' ? m : JSON.stringify(m, null, 2)) + "\n"; }
 
-  // 2) OAuth access_token’i URL hash’inden ya da senin backend’inden al
-  const accessToken = new URLSearchParams(location.hash.replace('#','')).get('access_token');
-  // (Prod’da token’i backend’inden alman daha güvenli)
+  // 1) Agent App SDK: Chat Details widget’ı olarak bağlan
+  const sdk = await window.LiveChat.createDetailsWidget();
 
-  // 3) Tam sohbeti çek (REST: list_archives ile thread bul, sonra get_chat)
+  // aktif sohbet id’sini al
+  const ctx = await sdk.getContext();
+  const chatId = ctx?.chat?.id;
+  if (!chatId) {
+    $('#state').innerHTML = "<small>Durum: sohbet seçili değil</small>";
+  } else {
+    $('#state').innerHTML = `<small>Durum: sohbet bulundu (chat_id: ${chatId})</small>`;
+  }
+  log({context: ctx});
+
+  // 2) access_token’i URL hash’inden oku (Implicit Flow sonrası #access_token=… gelir)
+  const hashParams = new URLSearchParams(location.hash.replace(/^#/, ''));
+  let accessToken = hashParams.get('access_token');
+
+  // 2a) Token yoksa “Giriş yap” butonunu göster
+  if (!accessToken) {
+    $('#signin').style.display = 'inline-block';
+    $('#signin').onclick = () => {
+      // AŞAĞIYI KENDİ BİLGİLERİNLE DOLDUR:
+      const CLIENT_ID = 'e65158671dae5dad51dd7d9b3fc8d222';
+      const REDIRECT_URI = 'https://deneme-ten-jade.vercel.app/'; // Widget URL’in neyse o
+      const SCOPES = encodeURIComponent('chats--access:ro'); // gerekirse chats--all:ro
+      const AUTH_URL =
+        `https://accounts.livechat.com/oauth/authorize?response_type=token&client_id=${CLIENT_ID}` +
+        `&redirect_uri=${encodeURIComponent(REDIRECT_URI)}&scope=${SCOPES}`;
+      window.location.href = AUTH_URL;
+    };
+    $('#state').innerHTML += " – <small>token yok → önce giriş yap</small>";
+  } else {
+    $('#state').innerHTML += " – <small>token bulundu</small>";
+    $('#export').style.display = 'inline-block';
+  }
+
+  // 3) Sohbeti çekip normalize eden fonksiyon
   async function fetchChatJson(chatId) {
-    // list_archives ile tek sohbete filtre örneği
-    const archives = await fetch('https://api.livechatinc.com/v3.5/agent/action/list_archives', {
+    if (!accessToken) throw new Error('access_token yok');
+    // list_archives: tek chat’i getir
+    const archivesRes = await fetch('https://api.livechatinc.com/v3.5/agent/action/list_archives', {
       method: 'POST',
-      headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+      headers: {
+        'Authorization': `Bearer ${accessToken}`,
+        'Content-Type': 'application/json'
+      },
       body: JSON.stringify({ filters: { chat_ids: [chatId] }, limit: 1 })
-    }).then(r => r.json());
+    });
+    if (!archivesRes.ok) {
+      const t = await archivesRes.text();
+      throw new Error('list_archives hata: ' + t);
+    }
+    const archives = await archivesRes.json();
+    log({archives_preview: archives?.chats?.[0]?.id});
 
-    // son thread id’sini çıkar
     const threadId = archives?.chats?.[0]?.threads?.slice(-1)?.[0]?.id;
 
-    // get_chat ile tam thread (tüm eventler)
-    const chat = await fetch('https://api.livechatinc.com/v3.5/agent/action/get_chat', {
+    // get_chat: tam thread
+    const chatRes = await fetch('https://api.livechatinc.com/v3.5/agent/action/get_chat', {
       method: 'POST',
-      headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+      headers: {
+        'Authorization': `Bearer ${accessToken}`,
+        'Content-Type': 'application/json'
+      },
       body: JSON.stringify({ chat_id: chatId, thread_id: threadId })
-    }).then(r => r.json());
+    });
+    if (!chatRes.ok) {
+      const t = await chatRes.text();
+      throw new Error('get_chat hata: ' + t);
+    }
+    const chat = await chatRes.json();
 
-    // 4) Sade JSON şeması
-    const normalized = {
+    return {
       chat_id: chatId,
-      thread_id: threadId,
+      thread_id: threadId || null,
       users: chat?.chat?.users || [],
       properties: chat?.chat?.properties || {},
       events: (chat?.chat?.thread?.events || []).map(e => ({
@@ -47,21 +114,32 @@
         ts: e.created_at,
         author_type: e.author?.type,
         author_id: e.author?.id,
-        type: e.type,                 // message, file, system, custom, etc.
+        type: e.type,
         text: e.text,
         attachments: e.attachments || null,
         custom: e.custom_id || null
       }))
     };
-    return normalized;
   }
 
-  // 5) İndir butonu
-  document.getElementById('export').onclick = async () => {
-    const data = await fetchChatJson(chatId);
-    const blob = new Blob([JSON.stringify(data, null, 2)], {type: 'application/json'});
-    const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: `chat-${data.chat_id}.json` });
-    a.click();
+  // 4) “JSON indir” butonu
+  $('#export').onclick = async () => {
+    try {
+      $('#state').innerHTML = "<small>Durum: veri çekiliyor…</small>";
+      const data = await fetchChatJson(chatId);
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `chat-${data.chat_id}.json`;
+      a.click();
+      $('#state').innerHTML = "<small>Durum: hazır – dosya indirildi</small>";
+      log({ok: true, size: blob.size});
+    } catch (err) {
+      $('#state').innerHTML = "<small>Durum: hata – konsola bak</small>";
+      log(err.message || err);
+    }
   };
 })();
 </script>
+</body>
+</html>
