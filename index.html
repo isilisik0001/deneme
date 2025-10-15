@@ -30,33 +30,50 @@
 <script>
 (async () => {
   const $ = sel => document.querySelector(sel);
-  const log = (m) => { const el = $('#log'); el.textContent += (typeof m === 'string' ? m : JSON.stringify(m, null, 2)) + "\n"; }
+  const log = (m) => { const el = $('#log'); el.textContent += (typeof m === 'string' ? m : JSON.stringify(m, null, 2)) + "\n"; };
 
-  // 1) Agent App SDK: Chat Details widget’ı olarak bağlan
+  // 1) Agent App SDK: Chat Details widget olarak bağlan
   const sdk = await window.LiveChat.createDetailsWidget();
 
-  // aktif sohbet id’sini al
-  const ctx = await sdk.getContext();
-  const chatId = ctx?.chat?.id;
-  if (!chatId) {
-    $('#state').innerHTML = "<small>Durum: sohbet seçili değil</small>";
-  } else {
-    $('#state').innerHTML = `<small>Durum: sohbet bulundu (chat_id: ${chatId})</small>`;
-  }
-  log({context: ctx});
+  // --- CHAT CONTEXT ---
+  let chatId = null;
 
-  // 2) access_token’i URL hash’inden oku (Implicit Flow sonrası #access_token=… gelir)
+  async function setInitialContext() {
+    const ctx = await sdk.getContext();
+    log({ ctx_initial: ctx });
+    if (ctx?.chat?.id) {
+      chatId = ctx.chat.id;
+      $('#state').innerHTML = `<small>Durum: sohbet bulundu (chat_id: ${chatId})</small>`;
+      maybeEnableExport();
+    } else {
+      $('#state').innerHTML = "<small>Durum: sohbet bekleniyor…</small>";
+    }
+  }
+
+  // Sohbet sonradan seçilirse yakala
+  sdk.on('chat_selected', (data) => {
+    log({ chat_selected: data });
+    chatId = data?.chat?.id || null;
+    if (chatId) {
+      $('#state').innerHTML = `<small>Durum: sohbet bulundu (chat_id: ${chatId})</small>`;
+      maybeEnableExport();
+    }
+  });
+
+  await setInitialContext();
+
+  // --- OAUTH/TOKEN ---
   const hashParams = new URLSearchParams(location.hash.replace(/^#/, ''));
   let accessToken = hashParams.get('access_token');
 
-  // 2a) Token yoksa “Giriş yap” butonunu göster
+  // Token yoksa butonu göster (HER ZAMAN)
+  const CLIENT_ID = 'e65158671dae5dad51dd7d9b3fc8d222';
+  const REDIRECT_URI = 'https://deneme-ten-jade.vercel.app/';
+  const SCOPES = encodeURIComponent('chats--access:ro chats--all:ro'); // sende all:ro da açık
+
   if (!accessToken) {
     $('#signin').style.display = 'inline-block';
     $('#signin').onclick = () => {
-      // AŞAĞIYI KENDİ BİLGİLERİNLE DOLDUR:
-      const CLIENT_ID = 'e65158671dae5dad51dd7d9b3fc8d222';
-      const REDIRECT_URI = 'https://deneme-ten-jade.vercel.app/'; // Widget URL’in neyse o
-      const SCOPES = encodeURIComponent('chats--access:ro'); // gerekirse chats--all:ro
       const AUTH_URL =
         `https://accounts.livechat.com/oauth/authorize?response_type=token&client_id=${CLIENT_ID}` +
         `&redirect_uri=${encodeURIComponent(REDIRECT_URI)}&scope=${SCOPES}`;
@@ -65,48 +82,43 @@
     $('#state').innerHTML += " – <small>token yok → önce giriş yap</small>";
   } else {
     $('#state').innerHTML += " – <small>token bulundu</small>";
-    $('#export').style.display = 'inline-block';
   }
 
-  // 3) Sohbeti çekip normalize eden fonksiyon
+  // İki şart tamamlanınca Export’u aç
+  function maybeEnableExport() {
+    if (chatId && accessToken) {
+      $('#export').style.display = 'inline-block';
+    } else {
+      $('#export').style.display = 'none';
+    }
+  }
+  maybeEnableExport();
+
+  // --- API: Sohbeti çek ---
   async function fetchChatJson(chatId) {
     if (!accessToken) throw new Error('access_token yok');
-    // list_archives: tek chat’i getir
+    if (!chatId) throw new Error('chatId yok');
     const archivesRes = await fetch('https://api.livechatinc.com/v3.5/agent/action/list_archives', {
       method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${accessToken}`,
-        'Content-Type': 'application/json'
-      },
+      headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ filters: { chat_ids: [chatId] }, limit: 1 })
     });
-    if (!archivesRes.ok) {
-      const t = await archivesRes.text();
-      throw new Error('list_archives hata: ' + t);
-    }
+    if (!archivesRes.ok) throw new Error('list_archives hata: ' + await archivesRes.text());
     const archives = await archivesRes.json();
-    log({archives_preview: archives?.chats?.[0]?.id});
 
-    const threadId = archives?.chats?.[0]?.threads?.slice(-1)?.[0]?.id;
+    const threadId = archives?.chats?.[0]?.threads?.slice(-1)?.[0]?.id || null;
 
-    // get_chat: tam thread
     const chatRes = await fetch('https://api.livechatinc.com/v3.5/agent/action/get_chat', {
       method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${accessToken}`,
-        'Content-Type': 'application/json'
-      },
+      headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ chat_id: chatId, thread_id: threadId })
     });
-    if (!chatRes.ok) {
-      const t = await chatRes.text();
-      throw new Error('get_chat hata: ' + t);
-    }
+    if (!chatRes.ok) throw new Error('get_chat hata: ' + await chatRes.text());
     const chat = await chatRes.json();
 
     return {
       chat_id: chatId,
-      thread_id: threadId || null,
+      thread_id: threadId,
       users: chat?.chat?.users || [],
       properties: chat?.chat?.properties || {},
       events: (chat?.chat?.thread?.events || []).map(e => ({
@@ -122,7 +134,7 @@
     };
   }
 
-  // 4) “JSON indir” butonu
+  // --- İndir butonu ---
   $('#export').onclick = async () => {
     try {
       $('#state').innerHTML = "<small>Durum: veri çekiliyor…</small>";
@@ -133,7 +145,7 @@
       a.download = `chat-${data.chat_id}.json`;
       a.click();
       $('#state').innerHTML = "<small>Durum: hazır – dosya indirildi</small>";
-      log({ok: true, size: blob.size});
+      log({ ok: true, size: blob.size });
     } catch (err) {
       $('#state').innerHTML = "<small>Durum: hata – konsola bak</small>";
       log(err.message || err);
@@ -143,3 +155,4 @@
 </script>
 </body>
 </html>
+
